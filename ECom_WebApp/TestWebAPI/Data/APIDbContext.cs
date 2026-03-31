@@ -1,0 +1,15 @@
+﻿using Microsoft.EntityFrameworkCore;
+using TestWebAPI.Models.Entities;
+
+namespace TestWebAPI.Data
+{
+    public class APIDbContext:DbContext
+    {
+        public APIDbContext(DbContextOptions<APIDbContext> options) : base(options)
+        {
+
+        }
+
+        public DbSet<Employee> Employee { get; set; }
+    }
+}
