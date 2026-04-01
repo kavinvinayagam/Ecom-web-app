@@ -79,7 +79,7 @@ stages:
   - deployment: DeployLocal
     displayName: 'Copy to C:\Users\yamuv\OneDrive\Desktop\ecom_check'
     pool:
-      name: 'LocalPool'                   # must match the pool name you set during agent setup
+      name: 'Default'                   # must match the pool name you set during agent setup
     environment: 'local-desktop'
     strategy:
       runOnce:
