@@ -1,1 +1,126 @@
 
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  dotnetVersion: '8.0.x'
+  buildConfig: 'Release'
+  root: 'ECom_WebApp'
+  webApiProject: '$(root)/TestWebAPI/TestWebAPI.csproj'
+  localDeployPath: 'C:\Users\yamuv\OneDrive\Desktop\ecom_check'
+
+
+stages:
+
+- stage: CI
+  displayName: 'CI — Build & Test'
+  jobs:
+
+  - job: Build
+    displayName: 'Restore & Build'
+    pool:
+      vmImage: 'windows-latest'           # Microsoft-hosted cloud agent
+    steps:
+
+    - task: UseDotNet@2
+      displayName: 'Use .NET $(dotnetVersion)'
+      inputs:
+        version: $(dotnetVersion)
+
+    - script: |
+        dotnet restore $(root)/Ecom.Core/Ecom.Core.csproj
+        dotnet restore $(root)/ECom.Application/ECom.Application.csproj
+        dotnet restore $(root)/ECom.Infra/ECom.Infra.csproj
+        dotnet restore $(root)/ECom.Presentation/ECom.Presentation.csproj
+        dotnet restore $(root)/ECommerceConsoleApp/ECommerceConsoleApp.csproj
+        dotnet restore $(root)/TestWebAPI/TestWebAPI.csproj
+      displayName: 'Restore all projects'
+
+    - script: |
+        dotnet build $(root)/Ecom.Core/Ecom.Core.csproj                    -c $(buildConfig) --no-restore
+        dotnet build $(root)/ECom.Application/ECom.Application.csproj       -c $(buildConfig) --no-restore
+        dotnet build $(root)/ECom.Infra/ECom.Infra.csproj                   -c $(buildConfig) --no-restore
+        dotnet build $(root)/ECom.Presentation/ECom.Presentation.csproj     -c $(buildConfig) --no-restore
+        dotnet build $(root)/ECommerceConsoleApp/ECommerceConsoleApp.csproj -c $(buildConfig) --no-restore
+        dotnet build $(root)/TestWebAPI/TestWebAPI.csproj                   -c $(buildConfig) --no-restore
+      displayName: 'Build (Core → Application → Infra → Presentation → WebAPI)'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Run tests'
+      inputs:
+        command: 'test'
+        projects: '$(webApiProject)'
+        arguments: '-c $(buildConfig) --no-restore --logger trx'
+        publishTestResults: true
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish WebAPI'
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: '$(webApiProject)'
+        arguments: '-c $(buildConfig) --no-restore --output $(Build.ArtifactStagingDirectory)/publish'
+        zipAfterPublish: false
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Upload artifact: webapi-drop'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/publish'
+        ArtifactName: 'webapi-drop'
+
+- stage: CD
+  displayName: 'CD — Deploy to Local Disk'
+  dependsOn: CI
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+
+  - deployment: DeployLocal
+    displayName: 'Copy to C:\Users\yamuv\OneDrive\Desktop\ecom_check'
+    pool:
+      name: 'LocalPool'                   # must match the pool name you set during agent setup
+    environment: 'local-desktop'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download webapi-drop'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'webapi-drop'
+              downloadPath: '$(Pipeline.Workspace)'
+
+          - task: PowerShell@2
+            displayName: 'Clear deploy folder'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $dest = "$(localDeployPath)"
+                if (Test-Path $dest) {
+                    Remove-Item "$dest\*" -Recurse -Force
+                    Write-Host "Cleared $dest"
+                } else {
+                    New-Item -ItemType Directory -Path $dest | Out-Null
+                    Write-Host "Created $dest"
+                }
+
+          - task: CopyFiles@2
+            displayName: 'Copy published files to local folder'
+            inputs:
+              SourceFolder: '$(Pipeline.Workspace)/webapi-drop'
+              Contents: '**'
+              TargetFolder: '$(localDeployPath)'
+              OverWrite: true
+
+          - task: PowerShell@2
+            displayName: 'Confirm deployment'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $dest = "$(localDeployPath)"
+                $count = (Get-ChildItem $dest -Recurse -File).Count
+                Write-Host "Deployment complete — $count files in $dest"
