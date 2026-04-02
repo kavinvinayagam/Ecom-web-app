@@ -1,3 +1,12 @@
+# azure-pipelines.yml
+# Place at the ROOT of your repo (same level as ECom_WebApp/)
+#
+# Before running this pipeline:
+#   1. Enable IIS on your Windows machine
+#   2. Install .NET 8 Hosting Bundle
+#   3. Create IIS site + app pool named "EComWebApp" pointing to C:\inetpub\wwwroot\EComWebApp
+#   4. Set up a self-hosted agent on your machine in a pool named "LocalPool"
+#   5. Connect this repo in Azure DevOps → Pipelines → New Pipeline
 
 trigger:
   branches:
@@ -9,19 +18,22 @@ variables:
   buildConfig: 'Release'
   root: 'ECom_WebApp'
   webApiProject: '$(root)/TestWebAPI/TestWebAPI.csproj'
-  localDeployPath: 'C:\Users\yamuv\OneDrive\Desktop\ecom_check'
+  iisAppPool: 'EComWebApp'
+  iisDeployPath: 'C:\inetpub\wwwroot\EComWebApp'
 
-
+# ════════════════════════════════════════════════════════
+# STAGE 1 — CI  (Microsoft cloud agent)
+# ════════════════════════════════════════════════════════
 stages:
 
 - stage: CI
   displayName: 'CI — Build & Test'
   jobs:
 
-  - job: Build
-    displayName: 'Restore & Build'
+  - job: BuildAndTest
+    displayName: 'Restore → Build → Test → Publish'
     pool:
-      vmImage: 'windows-latest'           # Microsoft-hosted cloud agent
+      vmImage: 'windows-latest'
     steps:
 
     - task: UseDotNet@2
@@ -45,12 +57,12 @@ stages:
         dotnet build $(root)/ECom.Presentation/ECom.Presentation.csproj     -c $(buildConfig) --no-restore
         dotnet build $(root)/ECommerceConsoleApp/ECommerceConsoleApp.csproj -c $(buildConfig) --no-restore
         dotnet build $(root)/TestWebAPI/TestWebAPI.csproj                   -c $(buildConfig) --no-restore
-      displayName: 'Build (Core → Application → Infra → Presentation → WebAPI)'
+      displayName: 'Build in dependency order'
 
     - task: DotNetCoreCLI@2
       displayName: 'Run tests'
       inputs:
-        command: 'test'
+        command: test
         projects: '$(webApiProject)'
         arguments: '-c $(buildConfig) --no-restore --logger trx'
         publishTestResults: true
@@ -58,29 +70,33 @@ stages:
     - task: DotNetCoreCLI@2
       displayName: 'Publish WebAPI'
       inputs:
-        command: 'publish'
+        command: publish
         publishWebProjects: false
         projects: '$(webApiProject)'
-        arguments: '-c $(buildConfig) --no-restore --output $(Build.ArtifactStagingDirectory)/publish'
+        arguments: '-c $(buildConfig) --no-restore --output $(Build.ArtifactStagingDirectory)/webapi'
         zipAfterPublish: false
 
     - task: PublishBuildArtifacts@1
       displayName: 'Upload artifact: webapi-drop'
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)/publish'
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/webapi'
         ArtifactName: 'webapi-drop'
 
+# ════════════════════════════════════════════════════════
+# STAGE 2 — CD  (self-hosted agent on YOUR machine)
+# Runs only on pushes to main, only after CI passes
+# ════════════════════════════════════════════════════════
 - stage: CD
-  displayName: 'CD — Deploy to Local Disk'
+  displayName: 'CD — Deploy to IIS'
   dependsOn: CI
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
 
-  - deployment: DeployLocal
-    displayName: 'Copy to C:\Users\yamuv\OneDrive\Desktop\ecom_check'
+  - deployment: DeployToIIS
+    displayName: 'Deploy to IIS — EComWebApp'
     pool:
-      name: 'Default'                   # must match the pool name you set during agent setup
-    environment: 'local-desktop'
+      name: 'Default'              # your self-hosted agent pool
+    environment: 'iis-local'
     strategy:
       runOnce:
         deploy:
@@ -89,17 +105,32 @@ stages:
           - task: DownloadBuildArtifacts@1
             displayName: 'Download webapi-drop'
             inputs:
-              buildType: 'current'
-              downloadType: 'single'
-              artifactName: 'webapi-drop'
-              downloadPath: '$(Pipeline.Workspace)'
+              buildType: current
+              downloadType: single
+              artifactName: webapi-drop
+              downloadPath: $(Pipeline.Workspace)
+
+          - task: PowerShell@2
+            displayName: 'Stop IIS app pool'
+            inputs:
+              targetType: inline
+              script: |
+                Import-Module WebAdministration
+                $pool = "$(iisAppPool)"
+                if ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped") {
+                    Stop-WebAppPool -Name $pool
+                    Start-Sleep -Seconds 3
+                    Write-Host "App pool '$pool' stopped."
+                } else {
+                    Write-Host "App pool '$pool' was already stopped."
+                }
 
           - task: PowerShell@2
             displayName: 'Clear deploy folder'
             inputs:
-              targetType: 'inline'
+              targetType: inline
               script: |
-                $dest = "$(localDeployPath)"
+                $dest = "$(iisDeployPath)"
                 if (Test-Path $dest) {
                     Remove-Item "$dest\*" -Recurse -Force
                     Write-Host "Cleared $dest"
@@ -109,18 +140,39 @@ stages:
                 }
 
           - task: CopyFiles@2
-            displayName: 'Copy published files to local folder'
+            displayName: 'Copy published files to IIS folder'
             inputs:
               SourceFolder: '$(Pipeline.Workspace)/webapi-drop'
               Contents: '**'
-              TargetFolder: '$(localDeployPath)'
+              TargetFolder: '$(iisDeployPath)'
               OverWrite: true
 
           - task: PowerShell@2
-            displayName: 'Confirm deployment'
+            displayName: 'Start IIS app pool'
             inputs:
-              targetType: 'inline'
+              targetType: inline
               script: |
-                $dest = "$(localDeployPath)"
+                Import-Module WebAdministration
+                $pool = "$(iisAppPool)"
+                Start-WebAppPool -Name $pool
+                Start-Sleep -Seconds 2
+                $state = (Get-WebAppPoolState -Name $pool).Value
+                Write-Host "App pool '$pool' is now: $state"
+                if ($state -ne "Started") {
+                    Write-Error "App pool failed to start."
+                }
+
+          - task: PowerShell@2
+            displayName: 'Verify deployment'
+            inputs:
+              targetType: inline
+              script: |
+                $dest = "$(iisDeployPath)"
+                $dll  = Get-ChildItem $dest -Filter "TestWebAPI.dll" -ErrorAction SilentlyContinue
+                if ($dll) {
+                    Write-Host "SUCCESS — TestWebAPI.dll found at $($dll.FullName)"
+                } else {
+                    Write-Error "TestWebAPI.dll not found in $dest — deployment may have failed."
+                }
                 $count = (Get-ChildItem $dest -Recurse -File).Count
-                Write-Host "Deployment complete — $count files in $dest"
+                Write-Host "$count files deployed to $dest"
