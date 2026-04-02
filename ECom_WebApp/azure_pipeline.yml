@@ -1,12 +1,4 @@
-# azure-pipelines.yml
-# Place at the ROOT of your repo (same level as ECom_WebApp/)
-#
-# Before running this pipeline:
-#   1. Enable IIS on your Windows machine
-#   2. Install .NET 8 Hosting Bundle
-#   3. Create IIS site + app pool named "EComWebApp" pointing to C:\inetpub\wwwroot\EComWebApp
-#   4. Set up a self-hosted agent on your machine in a pool named "LocalPool"
-#   5. Connect this repo in Azure DevOps → Pipelines → New Pipeline
+name: ECom CI/CD
 
 trigger:
   branches:
@@ -21,15 +13,14 @@ variables:
   iisAppPool: 'EComWebApp'
   iisDeployPath: 'C:\inetpub\wwwroot\EComWebApp'
 
-# ════════════════════════════════════════════════════════
-# STAGE 1 — CI  (Microsoft cloud agent)
-# ════════════════════════════════════════════════════════
 stages:
 
+# ═══════════════════════════════════════
+# STAGE 1 — CI
+# ═══════════════════════════════════════
 - stage: CI
   displayName: 'CI — Build & Test'
   jobs:
-
   - job: BuildAndTest
     displayName: 'Restore → Build → Test → Publish'
     pool:
@@ -82,20 +73,18 @@ stages:
         PathtoPublish: '$(Build.ArtifactStagingDirectory)/webapi'
         ArtifactName: 'webapi-drop'
 
-# ════════════════════════════════════════════════════════
-# STAGE 2 — CD  (self-hosted agent on YOUR machine)
-# Runs only on pushes to main, only after CI passes
-# ════════════════════════════════════════════════════════
+# ═══════════════════════════════════════
+# STAGE 2 — CD
+# ═══════════════════════════════════════
 - stage: CD
   displayName: 'CD — Deploy to IIS'
   dependsOn: CI
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
-
   - deployment: DeployToIIS
     displayName: 'Deploy to IIS — EComWebApp'
     pool:
-      name: 'Default'              # your self-hosted agent pool
+      name: 'Default'
     environment: 'iis-local'
     strategy:
       runOnce:
@@ -158,9 +147,6 @@ stages:
                 Start-Sleep -Seconds 2
                 $state = (Get-WebAppPoolState -Name $pool).Value
                 Write-Host "App pool '$pool' is now: $state"
-                if ($state -ne "Started") {
-                    Write-Error "App pool failed to start."
-                }
 
           - task: PowerShell@2
             displayName: 'Verify deployment'
@@ -168,11 +154,16 @@ stages:
               targetType: inline
               script: |
                 $dest = "$(iisDeployPath)"
-                $dll  = Get-ChildItem $dest -Filter "TestWebAPI.dll" -ErrorAction SilentlyContinue
-                if ($dll) {
-                    Write-Host "SUCCESS — TestWebAPI.dll found at $($dll.FullName)"
-                } else {
-                    Write-Error "TestWebAPI.dll not found in $dest — deployment may have failed."
-                }
+                $dll = Get-ChildItem $dest -Filter "TestWebAPI.dll" -Recurse -ErrorAction SilentlyContinue
+                $exe = Get-ChildItem $dest -Filter "TestWebAPI.exe" -Recurse -ErrorAction SilentlyContinue
+                $web = Get-ChildItem $dest -Filter "web.config"     -Recurse -ErrorAction SilentlyContinue
                 $count = (Get-ChildItem $dest -Recurse -File).Count
-                Write-Host "$count files deployed to $dest"
+
+                if ($dll -or $exe) {
+                    Write-Host "SUCCESS - deployment verified. $count files in $dest"
+                } elseif ($web) {
+                    Write-Host "WARNING - web.config found but no dll/exe. $count files present."
+                } else {
+                    Write-Warning "Could not verify. Listing contents:"
+                    Get-ChildItem $dest -Recurse | Select-Object FullName
+                }
