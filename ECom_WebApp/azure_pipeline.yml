@@ -99,6 +99,7 @@ stages:
               artifactName: webapi-drop
               downloadPath: $(Pipeline.Workspace)
 
+          # ── FIX 1: Stop app pool and wait until fully stopped ──
           - task: PowerShell@2
             displayName: 'Stop IIS app pool'
             inputs:
@@ -108,17 +109,35 @@ stages:
                 $pool = "$(iisAppPool)"
                 if ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped") {
                     Stop-WebAppPool -Name $pool
-                    Start-Sleep -Seconds 3
-                    Write-Host "App pool '$pool' stopped."
+                    # Wait up to 15 seconds for the pool to fully stop
+                    $timeout = 15
+                    while ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped" -and $timeout -gt 0) {
+                        Start-Sleep -Seconds 1
+                        $timeout--
+                        Write-Host "Waiting for app pool to stop... ($timeout s left)"
+                    }
+                    $finalState = (Get-WebAppPoolState -Name $pool).Value
+                    Write-Host "App pool '$pool' is now: $finalState"
                 } else {
                     Write-Host "App pool '$pool' was already stopped."
                 }
 
+          # ── FIX 2: Kill lingering process then clear deploy folder ──
           - task: PowerShell@2
             displayName: 'Clear deploy folder'
             inputs:
               targetType: inline
               script: |
+                # Kill any process still holding a lock on the deployed exe
+                $proc = Get-Process -Name "TestWebAPI" -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $proc | Stop-Process -Force
+                    Start-Sleep -Seconds 2
+                    Write-Host "Killed lingering TestWebAPI process."
+                } else {
+                    Write-Host "No lingering TestWebAPI process found."
+                }
+
                 $dest = "$(iisDeployPath)"
                 if (Test-Path $dest) {
                     Remove-Item "$dest\*" -Recurse -Force
@@ -144,7 +163,7 @@ stages:
                 Import-Module WebAdministration
                 $pool = "$(iisAppPool)"
                 Start-WebAppPool -Name $pool
-                Start-Sleep -Seconds 2
+                Start-Sleep -Seconds 3
                 $state = (Get-WebAppPoolState -Name $pool).Value
                 Write-Host "App pool '$pool' is now: $state"
 
