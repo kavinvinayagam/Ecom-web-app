@@ -67,6 +67,25 @@ stages:
         arguments: '-c $(buildConfig) --no-restore --output $(Build.ArtifactStagingDirectory)/webapi'
         zipAfterPublish: false
 
+    # ── FIX: Copy all extra content files (txt, md, json, etc.)
+    #         that dotnet publish skips, into the artifact folder ──
+    - task: CopyFiles@2
+      displayName: 'Copy extra content files into artifact'
+      inputs:
+        SourceFolder: '$(root)/TestWebAPI'
+        Contents: |
+          **\*.txt
+          **\*.md
+          **\*.json
+          **\*.xml
+          **\*.csv
+          **\*.html
+          **\*.htm
+          **\*.config
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/webapi/TestWebAPI'
+        OverWrite: true
+        flattenFolders: false
+
     - task: PublishBuildArtifacts@1
       displayName: 'Upload artifact: webapi-drop'
       inputs:
@@ -99,7 +118,7 @@ stages:
               artifactName: webapi-drop
               downloadPath: $(Pipeline.Workspace)
 
-          # ── FIX 1: Stop app pool and wait until fully stopped ──
+          # ── Stop app pool and wait until fully stopped ──
           - task: PowerShell@2
             displayName: 'Stop IIS app pool'
             inputs:
@@ -109,7 +128,6 @@ stages:
                 $pool = "$(iisAppPool)"
                 if ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped") {
                     Stop-WebAppPool -Name $pool
-                    # Wait up to 15 seconds for the pool to fully stop
                     $timeout = 15
                     while ((Get-WebAppPoolState -Name $pool).Value -ne "Stopped" -and $timeout -gt 0) {
                         Start-Sleep -Seconds 1
@@ -122,13 +140,12 @@ stages:
                     Write-Host "App pool '$pool' was already stopped."
                 }
 
-          # ── FIX 2: Kill lingering process then clear deploy folder ──
+          # ── Kill lingering process then clear deploy folder ──
           - task: PowerShell@2
             displayName: 'Clear deploy folder'
             inputs:
               targetType: inline
               script: |
-                # Kill any process still holding a lock on the deployed exe
                 $proc = Get-Process -Name "TestWebAPI" -ErrorAction SilentlyContinue
                 if ($proc) {
                     $proc | Stop-Process -Force
@@ -147,6 +164,7 @@ stages:
                     Write-Host "Created $dest"
                 }
 
+          # ── Copy ALL files including empty ones, preserving folder structure ──
           - task: CopyFiles@2
             displayName: 'Copy published files to IIS folder'
             inputs:
@@ -154,6 +172,7 @@ stages:
               Contents: '**'
               TargetFolder: '$(iisDeployPath)'
               OverWrite: true
+              flattenFolders: false
 
           - task: PowerShell@2
             displayName: 'Start IIS app pool'
@@ -172,10 +191,11 @@ stages:
             inputs:
               targetType: inline
               script: |
-                $dest = "$(iisDeployPath)"
-                $dll = Get-ChildItem $dest -Filter "TestWebAPI.dll" -Recurse -ErrorAction SilentlyContinue
-                $exe = Get-ChildItem $dest -Filter "TestWebAPI.exe" -Recurse -ErrorAction SilentlyContinue
-                $web = Get-ChildItem $dest -Filter "web.config"     -Recurse -ErrorAction SilentlyContinue
+                $dest  = "$(iisDeployPath)"
+                $dll   = Get-ChildItem $dest -Filter "TestWebAPI.dll" -Recurse -ErrorAction SilentlyContinue
+                $exe   = Get-ChildItem $dest -Filter "TestWebAPI.exe" -Recurse -ErrorAction SilentlyContinue
+                $web   = Get-ChildItem $dest -Filter "web.config"     -Recurse -ErrorAction SilentlyContinue
+                $extra = Get-ChildItem $dest -Include "*.txt","*.md"  -Recurse -ErrorAction SilentlyContinue
                 $count = (Get-ChildItem $dest -Recurse -File).Count
 
                 if ($dll -or $exe) {
@@ -185,4 +205,11 @@ stages:
                 } else {
                     Write-Warning "Could not verify. Listing contents:"
                     Get-ChildItem $dest -Recurse | Select-Object FullName
+                }
+
+                if ($extra) {
+                    Write-Host "Content files deployed:"
+                    $extra | ForEach-Object { Write-Host "  $($_.FullName)" }
+                } else {
+                    Write-Host "No .txt/.md files found in deploy folder."
                 }
